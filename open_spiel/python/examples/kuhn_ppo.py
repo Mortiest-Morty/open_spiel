@@ -109,9 +109,10 @@ def main(_):
 
     
     if FLAGS.load_checkpoints:
+      load_dir = FLAGS.checkpoint_dir + "iter_" + str(FLAGS.load_index)
       for index, agent in enumerate(agents):
-        if agent.has_checkpoint(FLAGS.checkpoint_dir + "iter_" + str(FLAGS.load_index)):
-          agent.restore(FLAGS.checkpoint_dir + "iter_" + str(FLAGS.load_index))
+        if agent.has_checkpoint(load_dir):
+          agent.restore(load_dir)
           print("load weights: iter_" + str(FLAGS.load_index) + "_player_" + str(index) + " success!")
         else:
           print("fail to load neural network weights: iter_" + str(FLAGS.load_index))
@@ -129,8 +130,11 @@ def main(_):
         logging.info("%s", msg)
       
       if (ep + 1) % FLAGS.save_every == 0:
+        save_dir = FLAGS.checkpoint_dir + "iter_" + str(ep + 1)
+        if not os.path.exists(save_dir):
+          os.makedirs(save_dir)
         for agent in agents:
-          agent.save(FLAGS.checkpoint_dir+"iter_"+str(ep + 1))
+          agent.save(save_dir)
 
       time_step = env.reset()
       while not time_step.last():
@@ -142,8 +146,7 @@ def main(_):
       # Episode is over, step all agents with final info state.
       for agent in agents:
         agent.step(time_step)
-      
-      
+
 
 if __name__ == "__main__":
   app.run(main)

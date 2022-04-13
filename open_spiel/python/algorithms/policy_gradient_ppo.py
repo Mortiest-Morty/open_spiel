@@ -430,7 +430,7 @@ class PolicyGradient(rl_agent.AbstractAgent):
     old_prob_a = [data.old_prob_a for data in self._episode_data]
     values = [data.values for data in self._episode_data]
 
-    # Calculate GAE Advantage and returns
+    # Calculate GAE Advantage
     rewards = np.array(rewards)
     advs = np.zeros_like(rewards)
     nextgae = np.zeros_like(rewards[0])
@@ -445,7 +445,13 @@ class PolicyGradient(rl_agent.AbstractAgent):
         
         delta = rewards[t] + self._extra_discount * discount[t] * nextvalues * curnonterminal - values[t]
         advs[t] = nextgae = delta + self._extra_discount * discount[t] * self._gae_lamda * curnonterminal * nextgae
-    returns = advs + values
+    
+    # Calculate returns
+    returns = np.array(rewards)
+    for idx in reversed(range(len(rewards[:-1]))):
+      returns[idx] = (
+          rewards[idx] +
+          discount[idx] * returns[idx + 1] * self._extra_discount)
 
     # Add flattened data points to dataset
     self._dataset["actions"].extend(actions)
