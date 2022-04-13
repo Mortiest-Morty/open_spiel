@@ -61,3 +61,4 @@ open_spiel/.vs
 
 
 *.log
+open_spiel/python/examples/checkpoints
