@@ -113,8 +113,11 @@ class PolicyGradient(rl_agent.AbstractAgent):
                additional_discount_factor=1.0,
                max_global_gradient_norm=None,
                optimizer_str="sgd",
+               use_gae=True,
                gae_lamda=0.95,
-               clip_param=0.2):
+               clip_param=0.2,
+               V_type="TD_target",
+               debug=False):
     """Initialize the PolicyGradient agent.
 
     Args:
@@ -152,6 +155,10 @@ class PolicyGradient(rl_agent.AbstractAgent):
     loss_class = loss_class if loss_class else self._get_loss_class(loss_str)
     self._loss_class = loss_class
 
+    self._use_gae = use_gae
+    self._V_type = V_type
+    self.DEBUG = debug
+    
     self.player_id = player_id
     self._session = session
     self._num_actions = num_actions
@@ -264,7 +271,7 @@ class PolicyGradient(rl_agent.AbstractAgent):
                                                      self._critic_loss)
 
     # Pi loss
-    pg_class = loss_class(entropy_cost=entropy_cost, clip_param=self._clip_param)
+    pg_class = loss_class(entropy_cost=entropy_cost, clip_param=self._clip_param, use_gae=self._use_gae)
     if loss_class.__name__ == "BatchA2CLoss":
       self._pi_loss = pg_class.loss(
           policy_logits=self._policy_logits,
@@ -321,14 +328,14 @@ class PolicyGradient(rl_agent.AbstractAgent):
     # Remove illegal actions, re-normalize probs
     probs = np.zeros(self._num_actions)
     probs[legal_actions] = policy_probs[0][legal_actions]
-    probs_ret = probs
+    probs_label = probs
     if sum(probs) != 0:
       probs /= sum(probs)
-      probs_ret = probs
+      probs_label = probs
     else:
       probs[legal_actions] = 1 / len(legal_actions)
     action = np.random.choice(len(probs), p=probs)
-    return action, probs_ret, values
+    return action, probs_label, probs, values
 
   def step(self, time_step, is_evaluation=False):
     """Returns the action to be taken and updates the network if needed.
@@ -346,11 +353,11 @@ class PolicyGradient(rl_agent.AbstractAgent):
         self.player_id == time_step.current_player()):
       info_state = time_step.observations["info_state"][self.player_id]
       legal_actions = time_step.observations["legal_actions"][self.player_id]
-      action, probs, values = self._act(info_state, legal_actions)
-      old_prob_a = probs[action]
+      action, probs_label, probs_act, values = self._act(info_state, legal_actions)
+      old_prob_a = probs_label[action]
     else:
       action = None
-      probs = []
+      probs_act = []
       values = []
       old_prob_a = []
 
@@ -359,7 +366,7 @@ class PolicyGradient(rl_agent.AbstractAgent):
 
       # Add data points to current episode buffer.
       if self._prev_time_step:
-        self._add_transition(time_step, self._prev_old_prob_a, self._prev_values)
+        self._add_transition(time_step)
 
       # Episode done, add to dataset and maybe learn.
       if time_step.last():
@@ -384,7 +391,7 @@ class PolicyGradient(rl_agent.AbstractAgent):
         self._prev_old_prob_a = old_prob_a
         self._prev_values = values
 
-    return rl_agent.StepOutput(action=action, probs=probs)
+    return rl_agent.StepOutput(action=action, probs=probs_act)
 
   def _full_checkpoint_name(self, checkpoint_dir, name):
     checkpoint_filename = "_".join(
@@ -431,11 +438,21 @@ class PolicyGradient(rl_agent.AbstractAgent):
     actions = [data.action for data in self._episode_data]
     legal_actions_mask = [data.legal_actions_mask for data in self._episode_data]
     old_prob_a = [data.old_prob_a for data in self._episode_data]
-    values = [data.values for data in self._episode_data]
+    values = [data.values[0] for data in self._episode_data]
 
+    if self.DEBUG:
+      print("info_states", info_states)
+      print("rewards", rewards)
+      print("discount", discount)
+      print("actions", actions)
+      print("legal_actions_mask", legal_actions_mask)
+      print("old_prob_a", old_prob_a)
+      print("values", values)
+      
     # Calculate GAE Advantage
     rewards = np.array(rewards)
     advs = np.zeros_like(rewards)
+    value_target = np.zeros_like(rewards)
     nextgae = np.zeros_like(rewards[0])
   
     for t in reversed(range(len(rewards))):
@@ -446,16 +463,29 @@ class PolicyGradient(rl_agent.AbstractAgent):
             curnonterminal = 1.0
             nextvalues = values[t + 1]
         
-        delta = rewards[t] + self._extra_discount * discount[t] * nextvalues * curnonterminal - values[t]
+        value_target[t] = rewards[t] + self._extra_discount * discount[t] * nextvalues * curnonterminal
+        delta = value_target[t] - values[t]
         advs[t] = nextgae = delta + self._extra_discount * discount[t] * self._gae_lamda * curnonterminal * nextgae
     
-    # Calculate returns
+    # returns = advs + np.array(values)
+    
+    # # Calculate returns
     returns = np.array(rewards)
     for idx in reversed(range(len(rewards[:-1]))):
       returns[idx] = (
           rewards[idx] +
           discount[idx] * returns[idx + 1] * self._extra_discount)
 
+    if self.DEBUG:
+      print("advs.shape", advs.shape)
+      print("advs", advs)
+      
+      print("rewards.shape", rewards.shape)
+      print("rewards", rewards)
+      
+      print("returns.shape", returns.shape)
+      print("returns", returns)
+    
     # Add flattened data points to dataset
     self._dataset["actions"].extend(actions)
     self._dataset["returns"].extend(returns)
@@ -463,9 +493,10 @@ class PolicyGradient(rl_agent.AbstractAgent):
     self._dataset["legal_actions_mask"].extend(legal_actions_mask)
     self._dataset["advantages"].extend(advs)
     self._dataset["old_prob_a"].extend(old_prob_a)
+    self._dataset["value_target"].extend(value_target)
     self._episode_data = []
 
-  def _add_transition(self, time_step, old_prob_a, values):
+  def _add_transition(self, time_step):
     """Adds intra-episode transition to the `_episode_data` buffer.
 
     Adds the transition from `self._prev_time_step` to `time_step`.
@@ -485,8 +516,8 @@ class PolicyGradient(rl_agent.AbstractAgent):
         reward=time_step.rewards[self.player_id],
         discount=time_step.discounts[self.player_id],
         legal_actions_mask=legal_actions_mask,
-        old_prob_a=old_prob_a,
-        values=values)
+        old_prob_a=self._prev_old_prob_a,
+        values=self._prev_values)
 
     self._episode_data.append(transition)
 
@@ -497,12 +528,17 @@ class PolicyGradient(rl_agent.AbstractAgent):
       The average Critic loss obtained on this batch.
     """
     # TODO(author3): illegal action handling.
+    if self._V_type == "TD_target":
+      return_target = self._dataset["value_target"]
+    elif self._V_type == "return":
+      return_target = self._dataset["returns"]
+    
     critic_loss, _ = self._session.run(
         [self._critic_loss, self._critic_learn_step],
         feed_dict={
             self._info_state_ph: self._dataset["info_states"],
             self._action_ph: self._dataset["actions"],
-            self._return_ph: self._dataset["returns"],
+            self._return_ph: return_target,
         })
     self._last_critic_loss_value = critic_loss
     return critic_loss
@@ -514,12 +550,18 @@ class PolicyGradient(rl_agent.AbstractAgent):
       The average Pi loss obtained on this batch.
     """
     # TODO(author3): illegal action handling.
+    
+    if self._V_type == "TD_target":
+      return_target = self._dataset["value_target"]
+    elif self._V_type == "return":
+      return_target = self._dataset["returns"]
+      
     pi_loss, _ = self._session.run(
         [self._pi_loss, self._pi_learn_step],
         feed_dict={
             self._info_state_ph: self._dataset["info_states"],
             self._action_ph: self._dataset["actions"],
-            self._return_ph: self._dataset["returns"],
+            self._return_ph: return_target,
             self._old_prob_a: self._dataset["old_prob_a"],
             self._legal_actions_mask: self._dataset["legal_actions_mask"],
             self._advantage: self._dataset["advantages"],

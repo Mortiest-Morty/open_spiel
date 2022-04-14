@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 import os
+import time
 
 from absl import app
 from absl import flags
@@ -39,21 +40,28 @@ flags.DEFINE_integer("save_every", int(5e4), "Save checkpoint of agents' models 
 flags.DEFINE_enum("loss_str", "ppo", ["a2c", "rpg", "qpg", "rm", "ppo"],
                   "PG loss to use.")
 flags.DEFINE_string("game_name", "kuhn_poker", "Name of the game")
-flags.DEFINE_integer("batch_size", 16, "batchsize of network")
+flags.DEFINE_integer("batch_size", 64, "batchsize of network")
 flags.DEFINE_integer("seed_", 10, "set seed for random")
 flags.DEFINE_string("checkpoint_dir", "checkpoints/",
                     "Directory to save/load the agent.")
 flags.DEFINE_bool("load_checkpoints", False, "load neural network weights.")
 flags.DEFINE_integer("load_idx", -1, "the exact index of the neural network weights to load")
 flags.DEFINE_integer("num_players", 2, "number of players in the setup game")
-flags.DEFINE_float("critic_lr", 0.001, "learning rate of critic network. Also learning rate of ACH.")
+flags.DEFINE_float("critic_lr", 0.001, "learning rate of critic network. Also learning rate of PPO.")
 flags.DEFINE_float("pi_lr", 0.001, "learning rate of policy network")
-flags.DEFINE_float('etpcost', 0.01, "entropy cost")
+flags.DEFINE_float('etpcost', 0.001, "entropy cost")
 flags.DEFINE_integer('nctopi', 1, "num critic before pi")
-flags.DEFINE_string("optm", "sgd", "optimizer for training")
+flags.DEFINE_string("optm", "adam", "optimizer for training ['sgd', 'adam', 'rms']")
 flags.DEFINE_float("clip_param", 0.2, "threshold for clip method")
-flags.DEFINE_float("gae_lamda", 0.95, "lamda parameter for gae advantage")
+flags.DEFINE_bool("use_gae", True, "use gae advantage or not.")
+flags.DEFINE_float("gae_lamda", 0.98, "lamda parameter for gae advantage")
+flags.DEFINE_enum("V_type", "TD_target", ["TD_target", "return"],
+                  "Critic target type to use.")
+flags.DEFINE_bool("debug", False, "Is debugging or not")
 
+def writefile(msg, filename):
+    with open(filename,'a') as f:
+        f.write(msg)
 
 class PolicyGradientPolicies(policy.Policy):
   """Joint policy to be evaluated."""
@@ -100,6 +108,15 @@ def main(_):
   info_state_size = env.observation_spec()["info_state"][0]
   num_actions = env.action_spec()["num_actions"]
 
+  filename = FLAGS.game_name + "_" + FLAGS.loss_str + "_cl" + str(FLAGS.critic_lr) \
+  + "_pl" + str(FLAGS.pi_lr) + "_ec"+ str(FLAGS.etpcost) + "_sd" + str(FLAGS.seed_) \
+  +"_bs" + str(FLAGS.batch_size) + "_optm" + str(FLAGS.optm) + "_clip_param" + str(FLAGS.clip_param) \
+  + "_use_gae" + str(FLAGS.use_gae) + "_gae_lamda" + str(FLAGS.gae_lamda) + "_V_type" + str(FLAGS.V_type)
+  FLAGS.checkpoint_dir = FLAGS.checkpoint_dir + filename
+  logname = "log/" + filename + ".log"
+  if not os.path.exists("log/"):
+    os.makedirs("log/")
+  
   with tf.Session() as sess:
     # pylint: disable=g-complex-comprehension
     agents = [
@@ -117,7 +134,10 @@ def main(_):
             clip_param=FLAGS.clip_param,
             num_critic_before_pi=FLAGS.nctopi,
             optimizer_str=FLAGS.optm,
-            gae_lamda=FLAGS.gae_lamda) for idx in range(num_players)
+            use_gae=FLAGS.use_gae,
+            gae_lamda=FLAGS.gae_lamda,
+            V_type=FLAGS.V_type,
+            debug=FLAGS.debug) for idx in range(num_players)
     ]
     expl_policies_avg = PolicyGradientPolicies(env, agents)
 
@@ -139,9 +159,11 @@ def main(_):
       if (ep + 1) % FLAGS.eval_every == 0:
         losses = [agent.loss for agent in agents]
         expl = exploitability.exploitability(env.game, expl_policies_avg)
-        msg = "-" * 80 + "\n"
+        msg = "{}".format(time.asctime(time.localtime(time.time())))
+        msg += "-" * 80 + "\n"
         msg += "{}: {}\n{}\n".format(ep + 1, expl, losses)
         logging.info("%s", msg)
+        writefile(msg, logname)
       
       if FLAGS.save_checkpoints and (ep + 1) % FLAGS.save_every == 0:
         save_dir = FLAGS.checkpoint_dir + "iter_" + str(ep + 1)

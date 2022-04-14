@@ -98,12 +98,12 @@ def compute_ppo_loss(policy_logits, actions, advantages, old_prob_a, clip_param)
   action_indices = tf.stack(
           [tf.range(tf.shape(policy_logits)[0]), actions], axis=-1)
   action_prob = tf.squeeze(tf.gather_nd(policy_logits, action_indices))
-  ratio = (action_prob/old_prob_a)
-  
+  ratio = tf.exp(
+        tf.log(tf.clip_by_value(action_prob, 1e-10, 1.0)) - tf.log(tf.clip_by_value(old_prob_a, 1e-10, 1.0)))
   advantages.get_shape().assert_is_compatible_with(ratio.get_shape())
   
-  surr1 = ratio * advantages
-  surr2 = tf.clip_by_value(ratio, 1 - clip_param, 1 + clip_param) * advantages
+  surr1 = tf.multiply(ratio, advantages)
+  surr2 = tf.multiply(tf.clip_by_value(ratio, 1 - clip_param, 1 + clip_param), advantages)
   
   return -tf.minimum(surr1, surr2)
 
@@ -249,10 +249,11 @@ class BatchA2CLoss(object):
 class BatchPPOLoss(object):
   """Defines the batch PPO loss op."""
 
-  def __init__(self, entropy_cost=None, name="batch_ppo_loss", clip_param=0.2):
+  def __init__(self, entropy_cost=None, name="batch_ppo_loss", clip_param=0.2, use_gae=True):
     self._entropy_cost = entropy_cost
     self._name = name
     self._clip_param = clip_param
+    self._use_gae = use_gae
 
   def loss(self, policy_logits, baseline, actions, returns, old_prob_a, legal_actions_mask, advantage):
     """Constructs a TF graph that computes the PPO loss for batches.
@@ -266,19 +267,24 @@ class BatchPPOLoss(object):
     Returns:
       loss: A 0-D `float` tensor corresponding the loss.
     """
-    _assert_rank_and_shape_compatibility([policy_logits], 2)
-    _assert_rank_and_shape_compatibility([baseline, actions, returns], 1)
+    _assert_rank_and_shape_compatibility([policy_logits, legal_actions_mask], 2)
+    _assert_rank_and_shape_compatibility([baseline, actions, returns, old_prob_a, advantage], 1)
 
+    if self._use_gae:
+      advantages = advantage
+    else:
+      advantages = returns - baseline
+    
     policy_logits = policy_logits * legal_actions_mask
     policy_logits = tf.div(policy_logits, tf.reduce_sum(policy_logits, axis=-1, keepdims=True))
     
-    policy_loss = compute_ppo_loss(policy_logits, actions, advantage, old_prob_a, self._clip_param)
+    policy_loss = compute_ppo_loss(policy_logits, actions, advantages, old_prob_a, self._clip_param)
     total_loss = tf.reduce_mean(policy_loss, axis=0)
     if self._entropy_cost:
       policy_entropy = tf.reduce_mean(compute_entropy(policy_logits))
       entropy_loss = tf.multiply(
           float(self._entropy_cost), policy_entropy, name="entropy_loss")
       total_loss = tf.add(
-          total_loss, entropy_loss, name="total_loss_with_entropy")
+          total_loss, -entropy_loss, name="total_loss_with_entropy")
 
     return total_loss
