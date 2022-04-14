@@ -34,16 +34,25 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_integer("num_episodes", int(1e6), "Number of train episodes.")
 flags.DEFINE_integer("eval_every", int(1e4), "Eval agents every x episodes.")
+flags.DEFINE_bool("save_checkpoints", False, "Save neural network weights or not.")
 flags.DEFINE_integer("save_every", int(5e4), "Save checkpoint of agents' models every x episodes.")
 flags.DEFINE_enum("loss_str", "ppo", ["a2c", "rpg", "qpg", "rm", "ppo"],
                   "PG loss to use.")
 flags.DEFINE_string("game_name", "kuhn_poker", "Name of the game")
-flags.DEFINE_integer("batch_size", 128, "batchsize of network")
-flags.DEFINE_integer("seed_", 6, "set seed for random")
+flags.DEFINE_integer("batch_size", 16, "batchsize of network")
+flags.DEFINE_integer("seed_", 10, "set seed for random")
 flags.DEFINE_string("checkpoint_dir", "checkpoints/",
                     "Directory to save/load the agent.")
 flags.DEFINE_bool("load_checkpoints", False, "load neural network weights.")
 flags.DEFINE_integer("load_idx", -1, "the exact index of the neural network weights to load")
+flags.DEFINE_integer("num_players", 2, "number of players in the setup game")
+flags.DEFINE_float("critic_lr", 0.001, "learning rate of critic network. Also learning rate of ACH.")
+flags.DEFINE_float("pi_lr", 0.001, "learning rate of policy network")
+flags.DEFINE_float('etpcost', 0.01, "entropy cost")
+flags.DEFINE_integer('nctopi', 1, "num critic before pi")
+flags.DEFINE_string("optm", "sgd", "optimizer for training")
+flags.DEFINE_float("clip_param", 0.2, "threshold for clip method")
+flags.DEFINE_float("gae_lamda", 0.95, "lamda parameter for gae advantage")
 
 
 class PolicyGradientPolicies(policy.Policy):
@@ -80,7 +89,7 @@ def main(_):
         str(gpu) + ',' for gpu in gpu_list)
   
   game = FLAGS.game_name
-  num_players = 2
+  num_players = FLAGS.num_players
 
   np.random.seed(FLAGS.seed_)
   tf.set_random_seed(FLAGS.seed_)
@@ -101,9 +110,14 @@ def main(_):
             num_actions,
             loss_str=FLAGS.loss_str,
             batch_size=FLAGS.batch_size,
-            hidden_layers_sizes=(128,),
-            num_critic_before_pi=1,
-            optimizer_str="adam") for idx in range(num_players)
+            hidden_layers_sizes=(128, ),
+            critic_learning_rate=FLAGS.critic_lr,
+            pi_learning_rate=FLAGS.pi_lr,
+            entropy_cost=FLAGS.etpcost,
+            clip_param=FLAGS.clip_param,
+            num_critic_before_pi=FLAGS.nctopi,
+            optimizer_str=FLAGS.optm,
+            gae_lamda=FLAGS.gae_lamda) for idx in range(num_players)
     ]
     expl_policies_avg = PolicyGradientPolicies(env, agents)
 
@@ -129,7 +143,7 @@ def main(_):
         msg += "{}: {}\n{}\n".format(ep + 1, expl, losses)
         logging.info("%s", msg)
       
-      if (ep + 1) % FLAGS.save_every == 0:
+      if FLAGS.save_checkpoints and (ep + 1) % FLAGS.save_every == 0:
         save_dir = FLAGS.checkpoint_dir + "iter_" + str(ep + 1)
         if not os.path.exists(save_dir):
           os.makedirs(save_dir)

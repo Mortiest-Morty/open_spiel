@@ -113,7 +113,8 @@ class PolicyGradient(rl_agent.AbstractAgent):
                additional_discount_factor=1.0,
                max_global_gradient_norm=None,
                optimizer_str="sgd",
-               gae_lamda=0.95):
+               gae_lamda=0.95,
+               clip_param=0.2):
     """Initialize the PolicyGradient agent.
 
     Args:
@@ -161,6 +162,8 @@ class PolicyGradient(rl_agent.AbstractAgent):
     
     # GAE parameters
     self._gae_lamda = gae_lamda
+    
+    self._clip_param = clip_param
 
     self._episode_data = []
     self._dataset = collections.defaultdict(list)
@@ -261,7 +264,7 @@ class PolicyGradient(rl_agent.AbstractAgent):
                                                      self._critic_loss)
 
     # Pi loss
-    pg_class = loss_class(entropy_cost=entropy_cost)
+    pg_class = loss_class(entropy_cost=entropy_cost, clip_param=self._clip_param)
     if loss_class.__name__ == "BatchA2CLoss":
       self._pi_loss = pg_class.loss(
           policy_logits=self._policy_logits,
